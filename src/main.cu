@@ -11,12 +11,15 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
-#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <string>
 #include <vector>
+
+#include <dirent.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 #include <cuda_runtime.h>
 #include <cuda_runtime_api.h>
@@ -25,8 +28,6 @@
 #include <npps.h>
 
 #include <opencv2/opencv.hpp>
-
-namespace fs = std::filesystem;
 
 // Named Constants following Google C++ Style (kConstantName)
 constexpr float kDefaultSigma = 2.0f;
@@ -144,32 +145,66 @@ NppiMaskSize GetNppMaskSize(int kernel_size) {
       return NPP_MASK_SIZE_15_X_15;
     default:
       std::cout << "[!] Warning: Kernel size " << kernel_size
-                << " not directly standard in NPP enum; using 9x9 mask.\n";
+                << " not standard in NPP enum; defaulting to 9x9 mask.\n";
       return NPP_MASK_SIZE_9_X_9;
   }
 }
 
-// Collects supported image files from a directory or single file path
-std::vector<fs::path> CollectImageFiles(const std::string& input_path) {
-  std::vector<fs::path> image_files;
-  fs::path p(input_path);
+// Helper to extract file basename
+std::string GetFilename(const std::string& path) {
+  size_t idx = path.find_last_of("/\\");
+  if (idx != std::string::npos) {
+    return path.substr(idx + 1);
+  }
+  return path;
+}
 
-  if (!fs::exists(p)) {
+// Helper to join directory and file path
+std::string JoinPath(const std::string& dir, const std::string& file) {
+  if (dir.empty()) return file;
+  if (dir.back() == '/' || dir.back() == '\\') {
+    return dir + file;
+  }
+  return dir + "/" + file;
+}
+
+// Creates directory path if missing
+void CreateDirectoryIfMissing(const std::string& path) {
+  struct stat s;
+  if (stat(path.c_str(), &s) != 0) {
+    mkdir(path.c_str(), 0755);
+  }
+}
+
+// Collects supported image files from a directory or single file path using POSIX dirent
+std::vector<std::string> CollectImageFiles(const std::string& input_path) {
+  std::vector<std::string> image_files;
+  struct stat s;
+  if (stat(input_path.c_str(), &s) != 0) {
     return image_files;
   }
 
-  if (fs::is_regular_file(p)) {
-    image_files.push_back(p);
-  } else if (fs::is_directory(p)) {
-    for (const auto& entry : fs::directory_iterator(p)) {
-      if (entry.is_regular_file()) {
-        std::string ext = entry.path().extension().string();
-        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-        if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" ||
-            ext == ".tif" || ext == ".tiff" || ext == ".bmp") {
-          image_files.push_back(entry.path());
+  if (S_ISREG(s.st_mode)) {
+    image_files.push_back(input_path);
+  } else if (S_ISDIR(s.st_mode)) {
+    DIR* dir = opendir(input_path.c_str());
+    if (dir != nullptr) {
+      struct dirent* entry;
+      while ((entry = readdir(dir)) != nullptr) {
+        std::string filename = entry->d_name;
+        if (filename == "." || filename == "..") continue;
+
+        size_t dot_idx = filename.find_last_of('.');
+        if (dot_idx != std::string::npos) {
+          std::string ext = filename.substr(dot_idx);
+          std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+          if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" ||
+              ext == ".tif" || ext == ".tiff" || ext == ".bmp") {
+            image_files.push_back(JoinPath(input_path, filename));
+          }
         }
       }
+      closedir(dir);
     }
   }
 
@@ -203,7 +238,7 @@ int main(int argc, char** argv) {
   AppOptions options = ParseCommandLineOptions(argc, argv);
 
   // Validate input path and collect dataset images
-  std::vector<fs::path> image_files = CollectImageFiles(options.input_path);
+  std::vector<std::string> image_files = CollectImageFiles(options.input_path);
   if (image_files.empty()) {
     std::cout << "===============================================================\n"
               << " NOTICE: Input path '" << options.input_path << "' is empty or contains\n"
@@ -214,7 +249,7 @@ int main(int argc, char** argv) {
   }
 
   // Ensure output directory exists
-  fs::create_directories(options.output_path);
+  CreateDirectoryIfMissing(options.output_path);
 
   // Query and display GPU device details
   int device_id = 0;
@@ -262,13 +297,14 @@ int main(int argc, char** argv) {
     // Step 1: Load images and enqueue GPU pipeline per stream
     for (size_t i = 0; i < current_batch_size; ++i) {
       size_t global_idx = batch_start + i;
-      const auto& file_path = image_files[global_idx];
+      const std::string& file_path = image_files[global_idx];
+      std::string filename = GetFilename(file_path);
 
       std::cout << "[" << (global_idx + 1) << "/" << total_images << "] Processing "
-                << file_path.filename().string() << std::endl;
+                << filename << std::endl;
 
       // Load image from host disk
-      cv::Mat img = cv::imread(file_path.string(), cv::IMREAD_UNCHANGED);
+      cv::Mat img = cv::imread(file_path, cv::IMREAD_UNCHANGED);
       if (img.empty()) {
         std::cerr << "Warning: Failed to load image " << file_path << ". Skipping.\n";
         continue;
@@ -297,38 +333,34 @@ int main(int argc, char** argv) {
       CUDA_CHECK(cudaMemcpyAsync(d_src_ptrs[i], src_mats[i].data, img_bytes,
                                  cudaMemcpyHostToDevice, streams[i]));
 
-      // Configure NPP stream context
-      NppStreamContext npp_ctx;
-      NPP_CHECK(nppGetStreamContext(&npp_ctx));
-      npp_ctx.hStream = streams[i];
+      // Set CUDA stream for NPP operations
+      NPP_CHECK(nppSetStream(streams[i]));
 
       NppiSize roi_size = {img.cols, img.rows};
       int src_step = static_cast<int>(img.step);
       int dst_step = static_cast<int>(dst_mats[i].step);
       int channels = img.channels();
 
-      // Launch NPP Filter kernel on stream
+      // Launch NPP Filter kernel on active stream
       if (options.filter_type == "gaussian") {
         if (channels == 1) {
-          NPP_CHECK(nppiFilterGaussian_8u_C1R_Ctx(
+          NPP_CHECK(nppiFilterGaussian_8u_C1R(
               d_src_ptrs[i], src_step, d_dst_ptrs[i], dst_step, roi_size,
-              npp_mask_size, npp_ctx));
+              npp_mask_size));
         } else if (channels == 3) {
-          NPP_CHECK(nppiFilterGaussian_8u_C3R_Ctx(
+          NPP_CHECK(nppiFilterGaussian_8u_C3R(
               d_src_ptrs[i], src_step, d_dst_ptrs[i], dst_step, roi_size,
-              npp_mask_size, npp_ctx));
+              npp_mask_size));
         } else {
           std::cerr << "Unsupported channel count: " << channels << std::endl;
         }
       } else if (options.filter_type == "sobel") {
         if (channels == 1) {
-          NPP_CHECK(nppiFilterSobelVert_8u_C1R_Ctx(
-              d_src_ptrs[i], src_step, d_dst_ptrs[i], dst_step, roi_size,
-              npp_mask_size, npp_ctx));
+          NPP_CHECK(nppiFilterSobelVert_8u_C1R(
+              d_src_ptrs[i], src_step, d_dst_ptrs[i], dst_step, roi_size));
         } else if (channels == 3) {
-          NPP_CHECK(nppiFilterSobelVert_8u_C3R_Ctx(
-              d_src_ptrs[i], src_step, d_dst_ptrs[i], dst_step, roi_size,
-              npp_mask_size, npp_ctx));
+          NPP_CHECK(nppiFilterSobelVert_8u_C3R(
+              d_src_ptrs[i], src_step, d_dst_ptrs[i], dst_step, roi_size));
         } else {
           std::cerr << "Unsupported channel count: " << channels << std::endl;
         }
@@ -355,8 +387,9 @@ int main(int argc, char** argv) {
 
         // Write processed frame to disk
         size_t global_idx = batch_start + i;
-        fs::path out_file_path = fs::path(options.output_path) / image_files[global_idx].filename();
-        cv::imwrite(out_file_path.string(), dst_mats[i]);
+        std::string filename = GetFilename(image_files[global_idx]);
+        std::string out_file_path = JoinPath(options.output_path, filename);
+        cv::imwrite(out_file_path, dst_mats[i]);
 
         // Unregister host memory and free device pointers
         CUDA_CHECK(cudaHostUnregister(src_mats[i].data));
