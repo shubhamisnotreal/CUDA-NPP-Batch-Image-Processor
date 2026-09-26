@@ -1,0 +1,22 @@
+# Compiled binaries and object files
+bin/
+*.o
+*.out
+
+# Python / Colab checkpoints
+__pycache__/
+.ipynb_checkpoints/
+
+# Output images (ignore generated batch outputs)
+output/*.png
+output/*.jpg
+output/*.jpeg
+output/*.tif
+output/*.tiff
+output/sobel/
+
+# EXCEPTIONS: Keep output log file and sample proof artifacts in repo
+!output/
+!output/log.txt
+!output/sample_before.png
+!output/sample_after.png

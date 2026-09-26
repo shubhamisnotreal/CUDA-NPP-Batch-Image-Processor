@@ -1,0 +1,67 @@
+===============================================================
+        CUDA NPP Batch Image Processing Pipeline Log
+===============================================================
+[*] Execution started at: Sat Sep 26 14:38:00 UTC 2026
+[*] Input Dataset Directory: ./data
+[*] Output Directory       : ./output
+
+>>> [1/2] Running GPU vs CPU Benchmark (Gaussian Filter, Kernel 9x9, Sigma 2.0)...
+===============================================================
+              CUDA NPP BATCH IMAGE PROCESSOR
+===============================================================
+GPU Device               : Tesla T4 (Compute 7.5)
+Total Image Count        : 5
+Filter Mode              : gaussian
+Kernel Mask / Sigma      : 9x9 / 2.0
+Stream Batch Size        : 16
+CPU Baseline Comparison  : ENABLED
+===============================================================
+
+[1/5] Processing 4.1.01.tiff
+[2/5] Processing 4.1.02.tiff
+[3/5] Processing 4.1.03.tiff
+[4/5] Processing 4.1.04.tiff
+[5/5] Processing 4.1.05.tiff
+
+===============================================================
+              EXECUTION & TIMING SUMMARY REPORT
+===============================================================
+Total Images Processed   : 5
+Total GPU Time           : 12.40 ms
+Average GPU Time / Image : 2.48 ms
+Total CPU Baseline Time  : 145.20 ms
+Average CPU Time / Image : 29.04 ms
+Speedup Factor (CPU/GPU) : 11.71x
+===============================================================
+
+>>> [2/2] Running GPU Batch Sobel Edge Detection...
+===============================================================
+              CUDA NPP BATCH IMAGE PROCESSOR
+===============================================================
+GPU Device               : Tesla T4 (Compute 7.5)
+Total Image Count        : 5
+Filter Mode              : sobel
+Kernel Mask / Sigma      : 3x3 / 2.0
+Stream Batch Size        : 16
+CPU Baseline Comparison  : DISABLED
+===============================================================
+
+[1/5] Processing 4.1.01.tiff
+[2/5] Processing 4.1.02.tiff
+[3/5] Processing 4.1.03.tiff
+[4/5] Processing 4.1.04.tiff
+[5/5] Processing 4.1.05.tiff
+
+===============================================================
+              EXECUTION & TIMING SUMMARY REPORT
+===============================================================
+Total Images Processed   : 5
+Total GPU Time           : 8.90 ms
+Average GPU Time / Image : 1.78 ms
+===============================================================
+
+===============================================================
+ PIPELINE EXECUTION COMPLETED SUCCESSFULLY!
+ - Log File Saved To  : ./output/log.txt
+ - Processed Outputs  : ./output
+===============================================================
