@@ -127,28 +127,36 @@ AppOptions ParseCommandLineOptions(int argc, char** argv) {
   return options;
 }
 
-// Maps integer kernel size to NPP NppiMaskSize enum
-NppiMaskSize GetNppMaskSize(int kernel_size) {
-  switch (kernel_size) {
-    case 3:
-      return NPP_MASK_SIZE_3_X_3;
-    case 5:
-      return NPP_MASK_SIZE_5_X_5;
-    case 7:
-      return NPP_MASK_SIZE_7_X_7;
-    case 9:
-      return NPP_MASK_SIZE_9_X_9;
-    case 11:
-      return NPP_MASK_SIZE_11_X_11;
-    case 13:
-      return NPP_MASK_SIZE_13_X_13;
-    case 15:
-      return NPP_MASK_SIZE_15_X_15;
-    default:
-      std::cout << "[!] Warning: Kernel size " << kernel_size
-                << " not standard in NPP enum; defaulting to 9x9 mask.\n";
-      return NPP_MASK_SIZE_9_X_9;
+// Generates 2D Gaussian Kernel weights and uploads to GPU for NPP 2D filtering
+void CreateGaussianKernel(int kernel_size, float sigma, Npp32s** d_kernel_out, Npp32s* divisor_out) {
+  if (kernel_size % 2 == 0) {
+    kernel_size += 1; // Ensure odd kernel size
   }
+  int half = kernel_size / 2;
+  double sigma2 = 2.0 * static_cast<double>(sigma) * static_cast<double>(sigma);
+  double sum = 0.0;
+
+  std::vector<double> weights(kernel_size * kernel_size);
+  for (int y = -half; y <= half; ++y) {
+    for (int x = -half; x <= half; ++x) {
+      double val = std::exp(-(x * x + y * y) / sigma2);
+      weights[(y + half) * kernel_size + (x + half)] = val;
+      sum += val;
+    }
+  }
+
+  Npp32s divisor = 10000;
+  std::vector<Npp32s> h_kernel(kernel_size * kernel_size);
+  for (size_t i = 0; i < weights.size(); ++i) {
+    h_kernel[i] = static_cast<Npp32s>(std::round((weights[i] / sum) * divisor));
+  }
+
+  Npp32s* d_kernel = nullptr;
+  CUDA_CHECK(cudaMalloc(&d_kernel, h_kernel.size() * sizeof(Npp32s)));
+  CUDA_CHECK(cudaMemcpy(d_kernel, h_kernel.data(), h_kernel.size() * sizeof(Npp32s), cudaMemcpyHostToDevice));
+
+  *d_kernel_out = d_kernel;
+  *divisor_out = divisor;
 }
 
 // Helper to extract file basename
@@ -271,7 +279,19 @@ int main(int argc, char** argv) {
             << "CPU Baseline Comparison  : " << (options.run_cpu ? "ENABLED" : "DISABLED") << "\n"
             << "===============================================================\n\n";
 
-  NppiMaskSize npp_mask_size = GetNppMaskSize(options.kernel_size);
+  // Pre-generate Gaussian kernel weights on GPU if Gaussian filter selected
+  Npp32s* d_gauss_kernel = nullptr;
+  Npp32s gauss_divisor = 1;
+  int k_size = options.kernel_size;
+  if (k_size % 2 == 0) k_size += 1;
+  int half_k = k_size / 2;
+  NppiSize kernel_npp_size = {k_size, k_size};
+  NppiPoint anchor_pt = {half_k, half_k};
+
+  if (options.filter_type == "gaussian") {
+    CreateGaussianKernel(k_size, options.sigma, &d_gauss_kernel, &gauss_divisor);
+  }
+
   size_t total_images = image_files.size();
   double total_gpu_time_ms = 0.0;
   double total_cpu_time_ms = 0.0;
@@ -337,8 +357,6 @@ int main(int argc, char** argv) {
       // Set CUDA stream for NPP operations
       NPP_CHECK(nppSetStream(streams[i]));
 
-      NppiSize src_size = {img.cols, img.rows};
-      NppiPoint src_offset = {0, 0};
       NppiSize roi_size = {img.cols, img.rows};
       int src_step = static_cast<int>(img.step);
       int dst_step = static_cast<int>(dst_mats[i].step);
@@ -347,15 +365,13 @@ int main(int argc, char** argv) {
       // Launch NPP Filter kernel on active stream
       if (options.filter_type == "gaussian") {
         if (channels == 1) {
-          NPP_CHECK(nppiFilterGaussianBorder_8u_C1R(
-              d_src_ptrs[i], src_step, src_size, src_offset,
-              d_dst_ptrs[i], dst_step, roi_size,
-              npp_mask_size, NPP_BORDER_REPLICATE));
+          NPP_CHECK(nppiFilter_8u_C1R(
+              d_src_ptrs[i], src_step, d_dst_ptrs[i], dst_step, roi_size,
+              d_gauss_kernel, kernel_npp_size, anchor_pt, gauss_divisor));
         } else if (channels == 3) {
-          NPP_CHECK(nppiFilterGaussianBorder_8u_C3R(
-              d_src_ptrs[i], src_step, src_size, src_offset,
-              d_dst_ptrs[i], dst_step, roi_size,
-              npp_mask_size, NPP_BORDER_REPLICATE));
+          NPP_CHECK(nppiFilter_8u_C3R(
+              d_src_ptrs[i], src_step, d_dst_ptrs[i], dst_step, roi_size,
+              d_gauss_kernel, kernel_npp_size, anchor_pt, gauss_divisor));
         } else {
           std::cerr << "Unsupported channel count: " << channels << std::endl;
         }
@@ -404,6 +420,10 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaStreamDestroy(streams[i]));
       }
     }
+  }
+
+  if (d_gauss_kernel != nullptr) {
+    CUDA_CHECK(cudaFree(d_gauss_kernel));
   }
 
   auto overall_end = std::chrono::high_resolution_clock::now();
