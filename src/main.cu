@@ -25,6 +25,7 @@
 #include <cuda_runtime_api.h>
 #include <npp.h>
 #include <nppi.h>
+#include <nppi_filtering_functions.h>
 #include <npps.h>
 
 #include <opencv2/opencv.hpp>
@@ -336,6 +337,8 @@ int main(int argc, char** argv) {
       // Set CUDA stream for NPP operations
       NPP_CHECK(nppSetStream(streams[i]));
 
+      NppiSize src_size = {img.cols, img.rows};
+      NppiPoint src_offset = {0, 0};
       NppiSize roi_size = {img.cols, img.rows};
       int src_step = static_cast<int>(img.step);
       int dst_step = static_cast<int>(dst_mats[i].step);
@@ -344,13 +347,15 @@ int main(int argc, char** argv) {
       // Launch NPP Filter kernel on active stream
       if (options.filter_type == "gaussian") {
         if (channels == 1) {
-          NPP_CHECK(nppiFilterGaussian_8u_C1R(
-              d_src_ptrs[i], src_step, d_dst_ptrs[i], dst_step, roi_size,
-              npp_mask_size));
+          NPP_CHECK(nppiFilterGaussianBorder_8u_C1R(
+              d_src_ptrs[i], src_step, src_size, src_offset,
+              d_dst_ptrs[i], dst_step, roi_size,
+              npp_mask_size, NPP_BORDER_REPLICATE));
         } else if (channels == 3) {
-          NPP_CHECK(nppiFilterGaussian_8u_C3R(
-              d_src_ptrs[i], src_step, d_dst_ptrs[i], dst_step, roi_size,
-              npp_mask_size));
+          NPP_CHECK(nppiFilterGaussianBorder_8u_C3R(
+              d_src_ptrs[i], src_step, src_size, src_offset,
+              d_dst_ptrs[i], dst_step, roi_size,
+              npp_mask_size, NPP_BORDER_REPLICATE));
         } else {
           std::cerr << "Unsupported channel count: " << channels << std::endl;
         }
